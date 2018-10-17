@@ -64,17 +64,16 @@ summary(train$transactionRevenue) #892138 NA : 98,7% de NA
 #max : 2,313e10
 train[is.na(train)] <- 0 #Assimilation des NA au 0
 
+train %>% filter(transactionRevenue>0) %>% 
+  summarise('Revenue par transaction'=sum(transactionRevenue)/(n()*1000000))
+
+
+
 #Representation de la var TransactionRevenue sans les 0
 #log pour lisser, bcp de variance
 as_tibble(log(train$transactionRevenue[train$transactionRevenue>0])) %>% 
   ggplot(aes(x = value)) +
   geom_histogram(bins = 30, fill="orange") 
-
-#On peut regarder s'il y a plusieurs sessions pour un ID
-
-table_test <- train[1:100000,]
-
-sqldf('select distinct fullVisitorId, count(*) from table_test group by fullVisitorId')
 
 
 
@@ -93,7 +92,7 @@ plot_temps_transac <- train[, .(revenue = sum(transactionRevenue, na.rm=TRUE)), 
 
 plot(plot_temps_transac)
 
-#On peut regarder le nombre de visite par jour
+#Nombre de visite par jour
 
 temps_visite <- train[, .(visite = .N), by=date] %>%
   ggplot(aes(x=date, y=visite))+
@@ -105,7 +104,7 @@ temps_visite <- train[, .(visite = .N), by=date] %>%
   )
 plot(temps_visite, plot_temps_transac)
 
-#on peut regarder quand arrive la fréquentation dans la journée
+#Fréquentation dans la journée
 
 train$visitStartTime <- as_datetime(train$visitStartTime) #
 
@@ -121,7 +120,7 @@ transaction_journee <- train[, .(heure_visite = hour(visitStartTime))][
 
 plot(transaction_journee)
 
-#De même pour le cumule des transactions
+#Transactions dans la journée
 
 transaction_journee <- train[, .(transactionRevenue, heure_visite = hour(visitStartTime))][
   , .(revenue = sum(transactionRevenue, na.rm =T)), by = heure_visite] %>%
@@ -134,5 +133,21 @@ transaction_journee <- train[, .(transactionRevenue, heure_visite = hour(visitSt
   )
 
 plot(transaction_journee)
+
+### Fréquentation dans la semaine #####
+
+
+
+transaction_semaine <- train[, .(jour_visite = weekdays(date))][
+  , .(revenue = sum(train$transactionRevenue, na.rm=TRUE)), by = jour_visite] %>%
+  ggplot(aes(x = jour_visite, y = revenue )) +
+  geom_line(color = 'steelblue', size = 1) +
+  labs(
+    x = 'Jour',
+    y = 'Visite',
+    title = 'Frequentation dans la semaine'
+  )
+
+plot(transaction_semaine)
 
 
