@@ -17,16 +17,11 @@ library(zoo)
 library(forecast)
 library(survMisc)
 library(stats)
-library(base)
 
 train <- read_csv("~/Downloads/all/train.csv")
-train2 <- train
+test <- read_csv("~/Downloads/all/test.csv")
 
 glimpse(train)
-
-#####################################################
-#################PREPARATION DATA####################
-#####################################################
 
 #Variables en format json : device, geoNetwork, totals, traffic_source => Changement
 
@@ -45,6 +40,7 @@ changement_json <- . %>%
   select(-device, -geoNetwork, -trafficSource, -totals)
 
 train <- changement_json(train)
+test <- changement_json(test)
 
 ###### transformation des phrases en NA ######
 
@@ -72,7 +68,7 @@ train %<>%
          country_medium = str_c(country, "_", medium),
          country_source = str_c(country, "_", source),
          dev_chan = str_c(deviceCategory, "_", channelGrouping),
-         date = as_datetime(visitStartTime),
+         date = ymd(date),
          year = year(date),
          wday = wday(date),
          hour = hour(date),
@@ -84,22 +80,7 @@ summary(train$transactionRevenue) #892138 NA : 98,7% de NA
 #min : 0
 #moy : 1,704e6 
 #max : 2,313e10
-
-train$transactionRevenue <- log1p(as.numeric(train$transactionRevenue))
 train[is.na(train)] <- 0 #Assimilation des NA au 0
-
-#On enlève toute la variable qui n'ont qu'une valeur donc aucune pertinence pour le model
-
-var_non_perti <- sapply(train, n_distinct)
-(var_non_perti <- names(var_non_perti[var_non_perti == 1]))
-
-train %<>%
-  select(-one_of(var_non_perti))
-
-#####################################################
-############### VISUALISATION DATA###################
-#####################################################
-
 
 train %>% filter(transactionRevenue>0) %>% 
   summarise('Revenue par transaction'=sum(transactionRevenue)/(n()*1000000))
@@ -135,15 +116,14 @@ temps_visite <- train[, .(visite = .N), by=date] %>%
     y='Nombre de visite',
     title='Visite par jour'
   )
-plot(temps_visite, plot_temps_transac)
+``
 
 #Fréquentation dans la journée
 
 train$visitStartTime <- as_datetime(train$visitStartTime, tz="Europe/Paris") #
 
-transaction_journee <- train[, .(heure_visite = hour(visitStartTime))][
-  , .(revenue = sum(train$transactionRevenue, na.rm=TRUE)), by = heure_visite] %>%
-  ggplot(aes(x = heure_visite, y = revenue / 10000)) +
+transaction_journee <- train[, .(revenue=sum(transactionRevenue, na.rm =T)), by = (heure=hour(visitStartTime))] %>%
+  ggplot(aes(x = heure , y = revenue / 10000)) +
   geom_line(color = 'steelblue', size = 1) +
   labs(
     x = 'Heure de la journée',
@@ -176,7 +156,7 @@ transaction_semaine <- train[,.(transactionRevenue,jour_visite=weekdays(date))][
   labs(
     x = 'Jour',
     y = 'Visite',
-      title = 'Revenue dans la semaine'
+    title = 'Revenue dans la semaine'
   )
 
 plot(transaction_semaine)
@@ -193,6 +173,8 @@ freq_semaine <- train[,.(freq=.N , jour_visite=weekdays(date))][
     y = 'Visite',
     title = 'Frequentation dans la semaine'
   )
+
+plot(freq_semaine)
 
 
 ### Evolution de la fréquentation dans le mois #####
@@ -225,21 +207,24 @@ plot(transaction_mois)
 
 ### serie temp - prédiction revenue en fonction du temps : MARCHE PAS ###
 
-train %>% bind_cols(tibble(rev = train$transactionRevenue)) %>%
+rev2 <- train %>%
   group_by(date) %>%
-  summarise(moy_rev = mean(rev)) %>%
-  with(zoo(moy_rev, order.by = date)) -> rev2
+  summarise(moy_rev = mean(transactionRevenue)) %>%
+  with(zoo(moy_rev, order.by = date)) 
 
 rev2.ts <- auto.arima(rev2)
 
-h2 <- max(train$date) - min(train$date) + 1
+forecast(rev2.ts) %>% 
+  plot(xlim=c(17375,17390))
 
-forecast(rev2.ts, h=h2 ) %>% 
-  plot()
+plot(forecast(stl(ts(rev2, frequency =7), s.window = 7)))
+
 
 #####################################################
 ####################MODELISATION#####################
 #####################################################
+
+
 
 ### En 2 temps : ###
 ### 1 etape : 0 = pas de vente, 1 = vente ###
@@ -256,7 +241,7 @@ train[, vente := ifelse(train$transactionRevenue > 0, 1, 0)]
 
 # On réduit notre jeu de données pour tester nos modèles
 
-train_model <- train[1:10000,]
+train_model <- train[]
 
 #Decomposition de l'heure pour des var catégorielles et changement en facteur pour les autres
 
@@ -268,33 +253,47 @@ train_model %<>%
       select(-date, -fullVisitorId, -visitId, -sessionId, -hits, -visitStartTime) %>%
     mutate_if(is.character, factor)
 
-train_model2 <- train_model[,lapply(train_model, n_distinct) %>% unlist() %>% as.vector() < 50 & 
-                             lapply(train_model, is.factor) %>% unlist() %>% as.vector()]
+train_model2 <- train_model[,lapply(train_model, n_distinct) %>% unlist() %>% as.vector() < 50 | 
+                             !(lapply(train_model, is.factor) %>% unlist() %>% as.vector())]
 #ajout de la var vente :
 
 vente_fact <- factor(train_model$vente)
 
 train_model2 <- cbind(train_model2,vente_fact)
 
-## RF MARCHE PAS ##
+
+
+##RF##
 
 library(randomForest)
 
-res.rf2 <- randomForest(vente ~ ., data=train2, ntree=500)
+w = sample(which(train_model2$vente==0),size = sum(train_model2$vente == 1))
 
-# GBM #
+indexes = c(w, which(train_model2$vente==1))
 
-library(gbm)
+res.rf2 <- randomForest(vente_fact ~ channelGrouping+visitNumber+operatingSystem+ isMobile+ deviceCategory+ continent+ subContinent+ campaign+ medium+
+                          isTrueDirect+ adContent+ campaignCode+ adwordsClickInfo.page+ adwordsClickInfo.slot+ adwordsClickInfo.adNetworkType+
+                          adwordsClickInfo.isVideoAd+ pageviews+ bounces+ newVisits+ campaign_medium+ dev_chan+ year+ wday+  annee+ mois+
+                          heure, data=train_model2[indexes,])
 
-  #apprentissage
-train_gb <- gbm(vente ~ ., data=train, distribution = "bernoulli")
+preds = predict(res.rf2, train_model2)
 
-  #prediction
-test_prediction <- predict(train_gb,newdata=test,n.trees=train_gb$n.trees)
+lmmodel <- randomForest(transactionRevenue ~ channelGrouping+visitNumber+operatingSystem+ isMobile+ deviceCategory+ continent+ subContinent+ campaign+ medium+
+                          isTrueDirect+ adContent+ campaignCode+ adwordsClickInfo.page+ adwordsClickInfo.slot+ adwordsClickInfo.adNetworkType+
+                          adwordsClickInfo.isVideoAd+ pageviews+ bounces+ newVisits+ campaign_medium+ dev_chan+ year+ wday+  annee+ mois+
+                          heure, data = train_model2[which(train_model2$transactionRevenue>0),])
+
+## 4-6% d'erreur ##
+## On regarde la prédiction de revenue ##
 
 
 
+data_vente <- train[which(train$transactionRevenue>0)]
 
+data_vente$transactionRevenue <- log1p(data_vente$transactionRevenue)
 
+mean(data_vente$transactionRevenue)
 
-
+lmmodel <- randomForest(transactionRevenue ~ channelGrouping+visitNumber+operatingSystem+ isMobile+ deviceCategory+ continent+ subContinent+ campaign+ medium+
+                          isTrueDirect+ adContent+ campaignCode+ adwordsClickInfo.page+ adwordsClickInfo.slot+ adwordsClickInfo.adNetworkType+
+                          adwordsClickInfo.isVideoAd+ pageviews+ bounces+ newVisits+ campaign_medium+ dev_chan+ year+ wday, data = data_vente)
